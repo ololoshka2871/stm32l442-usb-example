@@ -1,6 +1,9 @@
 #![no_std]
 #![no_main]
 
+use cortex_m_log::modes::InterruptOk;
+use cortex_m_log::printer::semihosting::hio::HStdout;
+use cortex_m_log::printer::{Printer, Semihosting, semihosting};
 use panic_halt as _;
 use rtic::app;
 
@@ -97,11 +100,14 @@ const APP: () = {
         usb_bus: &'static UsbBusAllocator<stm32_usbd::UsbBus<Peripheral>>,
         usb_device: UsbDevice<'static, stm32_usbd::UsbBus<Peripheral>>,
         serial: SerialPort<'static, stm32_usbd::UsbBus<Peripheral>>,
+        semihosting: Semihosting<InterruptOk, HStdout>,
     }
 
     #[init]
     fn init(ctx: init::Context) -> init::LateResources {
         static mut USB_BUS: Option<UsbBusAllocator<UsbBus<Peripheral>>> = None;
+
+        let mut semihosting = semihosting::InterruptOk::<_>::stdout().unwrap();
 
         // Alias peripherals
         let dp: pac::Peripherals = ctx.device;
@@ -110,6 +116,8 @@ const APP: () = {
         let mut flash = dp.FLASH.constrain();
         let mut pwr = dp.PWR.constrain(&mut rcc.apb1r1);
 
+
+        semihosting.println(format_args!("Enable PLLQ for USB 48Mhz..."));
         {
             // set USB 48Mhz clock src to PLLQ
             // can be configured only before PLL enable
@@ -126,6 +134,7 @@ const APP: () = {
             unsafe { _rcc.ccipr.modify(|_, w| w.clk48sel().bits(0b10)) };
         }
 
+        semihosting.println(format_args!("Configuring PLL..."));
         rcc.cfgr
             .hse(
                 12.mhz(), // onboard crystall
@@ -142,6 +151,7 @@ const APP: () = {
             .freeze(&mut flash.acr, &mut pwr);
 
         // USB pins
+        semihosting.println(format_args!("Creating usb allocator..."));
         let mut gpioa = dp.GPIOA.split(&mut rcc.ahb2);
         let usb = Peripheral {
             usb: dp.USB,
@@ -150,8 +160,10 @@ const APP: () = {
         };
         *USB_BUS = Some(UsbBus::new(usb));
 
+        semihosting.println(format_args!("Configuring USB CDCACM device..."));
         let serial = SerialPort::new(USB_BUS.as_ref().unwrap());
 
+        semihosting.println(format_args!("Configuring USB device..."));
         let usb_device =
             UsbDeviceBuilder::new(USB_BUS.as_ref().unwrap(), UsbVidPid(0x16c0, 0x27dd))
                 .manufacturer("Fake company")
@@ -163,8 +175,8 @@ const APP: () = {
         init::LateResources {
             usb_bus: USB_BUS.as_ref().unwrap(),
             usb_device,
-            //usb_hid,
             serial,
+            semihosting,
         }
     }
 

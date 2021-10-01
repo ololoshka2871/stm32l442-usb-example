@@ -18,3 +18,4 @@ cortex-m = "0.7.3"
 cortex-m-rtic = { version = "0.5.5" }
 stm32l4xx-hal = { version= "0.6.0", features = ["stm32l4x2", "rt"] }
 stm32-usbd = { version = "0.6.0" }
+cortex-m-log = { version = "0.7", features=["semihosting"] }
