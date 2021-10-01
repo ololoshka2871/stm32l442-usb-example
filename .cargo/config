@@ -3,8 +3,8 @@ rustflags = [
   "-C", "link-arg=-Tlink.x",
 ]
 
-[target.'cfg(all(target_arch = "arm", target_os = "none"))']
-runner = "probe-run --chip STM32L433VC" # --defmt
+#[target.'cfg(all(target_arch = "arm", target_os = "none"))']
+#runner = "probe-run --chip STM32L433VC" # --defmt
 
 [build]
 # Pick ONE of these compilation targets

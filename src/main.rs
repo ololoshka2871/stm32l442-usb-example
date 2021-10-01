@@ -3,19 +3,11 @@
 
 use panic_halt as _;
 use rtic::app;
-use rtt_target::{rprintln, rtt_init_print};
 
-use stm32_usbd::UsbBus;
-use stm32_usbd::UsbPeripheral;
+use stm32_usbd::{UsbBus, UsbPeripheral};
 use stm32l4xx_hal::device::RCC;
-use stm32l4xx_hal::gpio::Alternate;
-use stm32l4xx_hal::gpio::Floating;
-use stm32l4xx_hal::gpio::Input;
-use stm32l4xx_hal::gpio::AF10;
-use stm32l4xx_hal::gpio::PA11;
-use stm32l4xx_hal::gpio::PA12;
-use stm32l4xx_hal::rcc::PllConfig;
-use stm32l4xx_hal::rcc::PllDivider;
+use stm32l4xx_hal::gpio::{Alternate, Floating, Input, AF10, PA11, PA12};
+use stm32l4xx_hal::rcc::{PllConfig, PllDivider};
 use stm32l4xx_hal::{pac, prelude::*, stm32};
 
 use usb_device::{bus::UsbBusAllocator, prelude::*};
@@ -34,16 +26,53 @@ unsafe impl Sync for Peripheral {}
 unsafe impl UsbPeripheral for Peripheral {
     const REGISTERS: *const () = stm32::USB::ptr() as *const ();
 
-    const DP_PULL_UP_FEATURE: bool = true; // internal pull-up supported by stm32l*
-                                           // stm32l433.pdf: p.69
+    // internal pull-up supported by stm32l*
+    const DP_PULL_UP_FEATURE: bool = true;
+
+    // USB memory region stm32l433.pdf: p.69
     const EP_MEMORY: *const () = 0x4000_6C00 as _;
+
+    // 0x4000_6C00 - 0x4000_6FFF
     const EP_MEMORY_SIZE: usize = 1024;
     const EP_MEMORY_ACCESS_2X16: bool = true;
 
     fn enable() {
+        let crs = unsafe { &(*stm32::CRS::ptr()) };
         let rcc = unsafe { &*RCC::ptr() };
+        let pwr = unsafe { &*stm32::PWR::ptr() };
 
         cortex_m::interrupt::free(|_| {
+            // enable crs
+            rcc.apb1enr1.modify(|_, w| w.crsen().set_bit());
+
+            // Initialize clock recovery
+            // Set autotrim enabled.
+            crs.cr.modify(|_, w| w.autotrimen().set_bit());
+            // Enable CR
+            crs.cr.modify(|_, w| w.cen().set_bit());
+
+            //-------------------------------------------------
+            // Disable USB power isolation
+
+            // Enable PWR peripheral
+            rcc.apb1enr1.modify(|_, w| w.pwren().set_bit());
+
+            // enable montoring 1.2v
+            pwr.cr2.modify(|_, w| w.pvme1().set_bit());
+
+            // wait bit clear
+            while !pwr.sr2.read().pvmo1().bit_is_clear() {
+                cortex_m::asm::delay(1);
+            }
+
+            // disable monitoring
+            pwr.cr2.modify(|_, w| w.pvme1().clear_bit());
+
+            // Enable VddUSB
+            pwr.cr2.modify(|_, w| w.usv().set_bit());
+
+            //-------------------------------------------------
+
             // Enable USB peripheral
             rcc.apb1enr1.modify(|_, w| w.usbfsen().set_bit());
 
@@ -62,28 +91,6 @@ unsafe impl UsbPeripheral for Peripheral {
     }
 }
 
-fn enable_crs() {
-    let rcc = unsafe { &(*stm32::RCC::ptr()) };
-    rcc.apb1enr1.modify(|_, w| w.crsen().set_bit());
-    let crs = unsafe { &(*stm32::CRS::ptr()) };
-    // Initialize clock recovery
-    // Set autotrim enabled.
-    crs.cr.modify(|_, w| w.autotrimen().set_bit());
-    // Enable CR
-    crs.cr.modify(|_, w| w.cen().set_bit());
-}
-
-/// Enables VddUSB power supply
-fn enable_usb_pwr() {
-    // Enable PWR peripheral
-    let rcc = unsafe { &(*stm32::RCC::ptr()) };
-    rcc.apb1enr1.modify(|_, w| w.pwren().set_bit());
-
-    // Enable VddUSB
-    let pwr = unsafe { &*stm32::PWR::ptr() };
-    pwr.cr2.modify(|_, w| w.usv().set_bit());
-}
-
 #[app(device = stm32l4xx_hal::pac, peripherals = true)]
 const APP: () = {
     struct Resources {
@@ -96,53 +103,43 @@ const APP: () = {
     fn init(ctx: init::Context) -> init::LateResources {
         static mut USB_BUS: Option<UsbBusAllocator<UsbBus<Peripheral>>> = None;
 
-        // RTT handler
-        rtt_init_print!();
-
         // Alias peripherals
         let dp: pac::Peripherals = ctx.device;
 
-        rprintln!("Initializing peripherals");
         let mut rcc = dp.RCC.constrain();
         let mut flash = dp.FLASH.constrain();
         let mut pwr = dp.PWR.constrain(&mut rcc.apb1r1);
 
         {
-            // set USB 48Mhz clock src
+            // set USB 48Mhz clock src to PLLQ
             // can be configured only before PLL enable
             let _rcc = unsafe { &*stm32::RCC::ptr() };
 
             _rcc.pllcfgr.modify(|_, w| unsafe {
                 w.pllq()
-                    .bits(0b00) // /2
+                    .bits(0b00) // PLLQ = PLL/2
                     .pllqen()
                     .set_bit() // enable PLLQ
             });
 
             // PLLQ -> CLK48MHz
             unsafe { _rcc.ccipr.modify(|_, w| w.clk48sel().bits(0b10)) };
-            // HSI48 -> CLK48MHz
-            //unsafe { _rcc.ccipr.modify(|_, w| w.clk48sel().bits(0b00)) };
         }
 
         rcc.cfgr
-            .hsi48(true)
             .hse(
-                12.mhz(),
+                12.mhz(), // onboard crystall
                 stm32l4xx_hal::rcc::CrystalBypass::Disable,
                 stm32l4xx_hal::rcc::ClockSecuritySystem::Enable,
             )
-            .sysclk_with_pll(24.mhz(), PllConfig::new(1, 8, PllDivider::Div4))
+            .sysclk_with_pll(
+                24.mhz(),                               // CPU clock
+                PllConfig::new(1, 8, PllDivider::Div4), // PLL config
+            )
             .pll_source(stm32l4xx_hal::rcc::PllSource::HSE)
             .pclk1(24.mhz())
             .pclk2(24.mhz())
             .freeze(&mut flash.acr, &mut pwr);
-
-        rprintln!("Enable USB CRS");
-        enable_crs();
-
-        rprintln!("Enable USB power");
-        enable_usb_pwr();
 
         // USB pins
         let mut gpioa = dp.GPIOA.split(&mut rcc.ahb2);
@@ -159,11 +156,9 @@ const APP: () = {
             UsbDeviceBuilder::new(USB_BUS.as_ref().unwrap(), UsbVidPid(0x16c0, 0x27dd))
                 .manufacturer("Fake company")
                 .product("Serial port")
-                .serial_number("TEST")
+                .serial_number("0123456789")
                 .device_class(USB_CLASS_CDC)
                 .build();
-
-        rprintln!("Defining late resources...");
 
         init::LateResources {
             usb_bus: USB_BUS.as_ref().unwrap(),
@@ -175,15 +170,7 @@ const APP: () = {
 
     #[idle(resources = [usb_device, serial])]
     fn idle(_: idle::Context) -> ! {
-        let _rcc = unsafe { &*stm32::RCC::ptr() };
-        let pwr = unsafe { &*stm32::PWR::ptr() };
-        // HSI48 -> CLK48MHz
-        let mut _a = _rcc.apb1enr1.read().pwren().bits();
-        let mut _b = pwr.cr2.read().usv().bits();
-
         loop {
-            _a = !_a;
-            _b = !_b;
             cortex_m::asm::nop();
             cortex_m::asm::wfi();
         }
@@ -191,12 +178,34 @@ const APP: () = {
 
     #[task(binds = USB, resources = [usb_device, serial])]
     fn usb_handler(ctx: usb_handler::Context) {
-        rprintln!("USB interrupt received.");
-
         let dev = ctx.resources.usb_device;
         let serial = ctx.resources.serial;
 
         // USB dev poll only in the interrupt handler
-        dev.poll(&mut [serial]);
+        if dev.poll(&mut [serial]) {
+            let mut buf = [0u8; 64];
+
+            match serial.read(&mut buf) {
+                Ok(count) if count > 0 => {
+                    // Echo back in upper case
+                    for c in buf[0..count].iter_mut() {
+                        if 0x61 <= *c && *c <= 0x7a {
+                            *c &= !0x20;
+                        }
+                    }
+
+                    let mut write_offset = 0;
+                    while write_offset < count {
+                        match serial.write(&buf[write_offset..count]) {
+                            Ok(len) if len > 0 => {
+                                write_offset += len;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 };
