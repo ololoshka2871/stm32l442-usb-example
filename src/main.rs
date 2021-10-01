@@ -169,6 +169,7 @@ const APP: () = {
                 .manufacturer("Fake company")
                 .product("Serial port")
                 .serial_number("0123456789")
+                .max_packet_size_0(64)
                 .device_class(USB_CLASS_CDC)
                 .build();
 
